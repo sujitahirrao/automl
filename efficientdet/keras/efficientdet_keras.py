@@ -122,9 +122,7 @@ class FNode(tf.keras.layers.Layer):
   def _add_wsm(self, initializer):
     for i, _ in enumerate(self.inputs_offsets):
       name = 'WSM' + ('' if i == 0 else '_' + str(i))
-      self.vars.append(
-          self.add_weight(
-              initializer=initializer, name=name))
+      self.vars.append(self.add_weight(initializer=initializer, name=name))
 
   def build(self, feats_shape):
     for i, input_offset in enumerate(self.inputs_offsets):
@@ -854,8 +852,7 @@ class EfficientDetModel(EfficientDetNet):
       return [tf.stack(y) for y in zip(*outputs)]
 
     # otherwise treat it as dynamic batch size.
-    return postprocess.batch_map_fn(
-        map_fn, raw_images, dtype=(tf.float32, tf.float32))
+    return tf.map_fn(map_fn, raw_images, dtype=(tf.float32, tf.float32))
 
   def _postprocess(self, cls_outputs, box_outputs, scales, mode='global'):
     """Postprocess class and box predictions."""
@@ -874,7 +871,7 @@ class EfficientDetModel(EfficientDetNet):
                                                cls_outputs, box_outputs, scales)
     raise ValueError('Unsupported postprocess mode {}'.format(mode))
 
-  def call(self, inputs, training, pre_mode='infer', post_mode='global'):
+  def call(self, inputs, training=False, pre_mode='infer', post_mode='global'):
     """Call this model.
 
     Args:
