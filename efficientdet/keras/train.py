@@ -210,7 +210,9 @@ def main(_):
                     label_smoothing=params['label_smoothing'],
                     reduction=tf.keras.losses.Reduction.NONE),
             'seg_loss':
-                tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+                tf.keras.losses.SparseCategoricalCrossentropy(
+                    from_logits=True,
+                    reduction=tf.keras.losses.Reduction.NONE)
         })
 
     if FLAGS.pretrained_ckpt:

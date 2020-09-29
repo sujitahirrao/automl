@@ -327,7 +327,7 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
     labels: the input labels in a dictionary. The labels include class targets
       and box targets which are dense label maps. The labels are generated from
       get_input_fn function in data/dataloader.py
-    mode: the mode of TPUEstimator including TRAIN, EVAL, and PREDICT.
+    mode: the mode of TPUEstimator including TRAIN and EVAL.
     params: the dictionary defines hyperparameters of model. The default
       settings are in default_hparams function in this file.
     model: the model outputs class logits and box regression outputs.
@@ -340,7 +340,9 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
   Raises:
     RuntimeError: if both ckpt and backbone_ckpt are set.
   """
-  utils.image('input_image', features)
+  is_tpu = params['strategy'] == 'tpu'
+  if params['img_summary_steps']:
+    utils.image('input_image', features, is_tpu)
   training_hooks = []
   params['is_training_bn'] = (mode == tf.estimator.ModeKeys.TRAIN)
 
@@ -367,16 +369,6 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
     cls_outputs[level] = tf.cast(cls_outputs[level], tf.float32)
     box_outputs[level] = tf.cast(box_outputs[level], tf.float32)
 
-  # First check if it is in PREDICT mode.
-  if mode == tf.estimator.ModeKeys.PREDICT:
-    predictions = {
-        'image': features,
-    }
-    for level in levels:
-      predictions['cls_outputs_%d' % level] = cls_outputs[level]
-      predictions['box_outputs_%d' % level] = box_outputs[level]
-    return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
-
   # Set up training loss and learning rate.
   update_learning_rate_schedule_parameters(params)
   global_step = tf.train.get_or_create_global_step()
@@ -389,16 +381,16 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
   total_loss = det_loss + reg_l2loss
 
   if mode == tf.estimator.ModeKeys.TRAIN:
-    utils.scalar('lrn_rate', learning_rate)
-    utils.scalar('trainloss/cls_loss', cls_loss)
-    utils.scalar('trainloss/box_loss', box_loss)
-    utils.scalar('trainloss/det_loss', det_loss)
-    utils.scalar('trainloss/reg_l2_loss', reg_l2loss)
-    utils.scalar('trainloss/loss', total_loss)
+    utils.scalar('lrn_rate', learning_rate, is_tpu)
+    utils.scalar('trainloss/cls_loss', cls_loss, is_tpu)
+    utils.scalar('trainloss/box_loss', box_loss, is_tpu)
+    utils.scalar('trainloss/det_loss', det_loss, is_tpu)
+    utils.scalar('trainloss/reg_l2_loss', reg_l2loss, is_tpu)
+    utils.scalar('trainloss/loss', total_loss, is_tpu)
     if params['iou_loss_type']:
-      utils.scalar('trainloss/box_iou_loss', box_iou_loss)
+      utils.scalar('trainloss/box_iou_loss', box_iou_loss, is_tpu)
     train_epochs = tf.cast(global_step, tf.float32) / params['steps_per_epoch']
-    utils.scalar('train_epochs', train_epochs)
+    utils.scalar('train_epochs', train_epochs, is_tpu)
 
   moving_average_decay = params['moving_average_decay']
   if moving_average_decay:
@@ -415,23 +407,25 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
     else:
       raise ValueError('optimizers should be adam or sgd')
 
-    if params['strategy'] == 'tpu':
+    if is_tpu:
       optimizer = tf.tpu.CrossShardOptimizer(optimizer)
-    if params['gradient_checkpointing']:
-      from third_party.grad_checkpoint import memory_saving_gradients  # pylint: disable=import-outside-toplevel
-      from tensorflow.python.ops import gradients  # pylint: disable=import-outside-toplevel
+    if params['device']['grad_ckpting']:
+      # pylint: disable=g-import-not-at-top,g-direct-tensorflow-import
+      from third_party.grad_checkpoint import grad
+      from tensorflow.python.ops import gradients
+      # pylint: enable=g-import-not-at-top,g-direct-tensorflow-import
 
       # monkey patch tf.gradients to point to our custom version,
       # with automatic checkpoint selection
       def gradients_(ys, xs, grad_ys=None, **kwargs):
-        return memory_saving_gradients.gradients(
+        return grad.gradients(
             ys,
             xs,
             grad_ys,
-            checkpoints=params['gradient_checkpointing_list'],
+            checkpoints=params['device']['grad_ckpting_list'],
             **kwargs)
 
-      gradients.__dict__["gradients"] = gradients_
+      gradients.__dict__['gradients'] = gradients_
 
     # Batch norm requires update_ops to be added as a train_op dependency.
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -452,7 +446,8 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
             for g in grads
         ]
         clipped_grads, _ = tf.clip_by_global_norm(clipped_grads, clip_norm)
-        utils.scalar('gradient_norm', tf.linalg.global_norm(clipped_grads))
+        utils.scalar('gradient_norm', tf.linalg.global_norm(clipped_grads),
+                     is_tpu)
         grads_and_vars = list(zip(clipped_grads, tvars))
 
       with tf.control_dependencies(update_ops):
@@ -602,7 +597,16 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
   else:
     scaffold_fn = None
 
-  if params['strategy'] != 'tpu':
+  if is_tpu:
+    return tf.estimator.tpu.TPUEstimatorSpec(
+        mode=mode,
+        loss=total_loss,
+        train_op=train_op,
+        eval_metrics=eval_metrics,
+        host_call=utils.get_tpu_host_call(global_step, params),
+        scaffold_fn=scaffold_fn,
+        training_hooks=training_hooks)
+  else:
     # Profile every 1K steps.
     if params.get('profile', False):
       profile_hook = tf.estimator.ProfilerHook(
@@ -630,36 +634,22 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
     )
     training_hooks.append(logging_hook)
 
-    if params["nvgpu_logging"]:
+    if params['device']['nvgpu_logging']:
       try:
-        from third_party.tools.nvgpu import gpu_memory_util_message  # pylint: disable=import-outside-toplevel
-
-        mem_message = tf.py_func(gpu_memory_util_message, [], [tf.string])[0]
-
+        from third_party.tools import nvgpu  # pylint: disable=g-import-not-at-top
+        mem_message = tf.py_func(nvgpu.gpu_memory_util_message, [],
+                                 [tf.string])[0]
         logging_hook_nvgpu = tf.estimator.LoggingTensorHook(
-            tensors={
-                "mem_message": mem_message,
-            },
+            tensors={'mem_message': mem_message},
             every_n_iter=params.get('iterations_per_loop', 100),
-            formatter=lambda x: x["mem_message"].decode("utf-8"),
+            formatter=lambda x: x['mem_message'].decode('utf-8'),
         )
         training_hooks.append(logging_hook_nvgpu)
-      except:
-        logging.error("nvgpu error: nvidia-smi format not recognized")
+      except:  # pylint: disable=bare-except
+        logging.error('nvgpu error: nvidia-smi format not recognized.')
 
-  if params['strategy'] == 'tpu':
-    return tf.estimator.tpu.TPUEstimatorSpec(
-        mode=mode,
-        loss=total_loss,
-        train_op=train_op,
-        eval_metrics=eval_metrics,
-        host_call=utils.get_tpu_host_call(global_step, params),
-        scaffold_fn=scaffold_fn,
-        training_hooks=training_hooks)
-  else:
     eval_metric_ops = (
         eval_metrics[0](**eval_metrics[1]) if eval_metrics else None)
-    utils.get_tpu_host_call(global_step, params)
     return tf.estimator.EstimatorSpec(
         mode=mode,
         loss=total_loss,
