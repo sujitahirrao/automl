@@ -182,6 +182,7 @@ def default_detection_configs():
   h.jitter_max = 2.0
   h.autoaugment_policy = None
   h.use_augmix = False
+  h.grid_mask = False
   # mixture_width, mixture_depth, alpha
   h.augmix_params = [3, -1, 1]
   h.sample_image = None
@@ -401,6 +402,7 @@ efficientdet_lite_param_dict = {
             box_class_repeats=3,
             act_type='relu',
             fpn_weight_method='sum',
+            anchor_scale=3.0,
         ),
     'efficientdet-lite1':
         dict(
@@ -412,17 +414,19 @@ efficientdet_lite_param_dict = {
             box_class_repeats=3,
             act_type='relu',
             fpn_weight_method='sum',
+            anchor_scale=3.0,
         ),
     'efficientdet-lite2':
         dict(
             name='efficientdet-lite2',
             backbone_name='efficientnet-lite2',
-            image_size=480,
+            image_size=448,
             fpn_num_filters=112,
             fpn_cell_repeats=5,
             box_class_repeats=3,
             act_type='relu',
             fpn_weight_method='sum',
+            anchor_scale=3.0,
         ),
     'efficientdet-lite3':
         dict(
@@ -439,7 +443,7 @@ efficientdet_lite_param_dict = {
         dict(
             name='efficientdet-lite4',
             backbone_name='efficientnet-lite4',
-            image_size=640,
+            image_size=512,
             fpn_num_filters=224,
             fpn_cell_repeats=7,
             box_class_repeats=4,

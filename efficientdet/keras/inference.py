@@ -72,6 +72,7 @@ def visualize_image(image,
 
 
 class ExportModel(tf.Module):
+  """Model to be exported as SavedModel/TFLite format."""
 
   def __init__(self, model):
     super().__init__()
@@ -80,6 +81,10 @@ class ExportModel(tf.Module):
   @tf.function
   def __call__(self, imgs):
     return self.model(imgs, training=False, post_mode='global')
+
+  @tf.function
+  def tflite_call(self, imgs):
+    return self.model(imgs, training=False, pre_mode=None, post_mode=None)
 
 
 class ServingDriver(object):
@@ -270,44 +275,70 @@ class ServingDriver(object):
     return graphdef
 
   def export(self,
-             output_dir: Text,
-             tflite_path: Text = None,
-             tensorrt: Text = None):
+             output_dir: Text = None,
+             tensorrt: Text = None,
+             tflite: Text = None):
     """Export a saved model, frozen graph, and potential tflite/tensorrt model.
 
     Args:
       output_dir: the output folder for saved model.
-      tflite_path: the path for saved tflite file.
       tensorrt: If not None, must be {'FP32', 'FP16', 'INT8'}.
+      tflite: If not None, must be {'FP32', 'FP16', 'INT8'}.
     """
     if not self.model:
       self.build()
+
     export_model = ExportModel(self.model)
-    tf.saved_model.save(
-        export_model,
-        output_dir,
-        signatures=export_model.__call__.get_concrete_function(
-            tf.TensorSpec(
-                shape=[None, None, None, 3], dtype=tf.uint8, name='images')))
-    logging.info('Model saved at %s', output_dir)
+    if output_dir:
+      tf.saved_model.save(
+          export_model,
+          output_dir,
+          signatures=export_model.__call__.get_concrete_function(
+              tf.TensorSpec(
+                  shape=[None, None, None, 3], dtype=tf.uint8, name='images')))
+      logging.info('Model saved at %s', output_dir)
 
-    # also save freeze pb file.
-    graphdef = self.freeze(
-        export_model.__call__.get_concrete_function(
-            tf.TensorSpec(
-                shape=[None, None, None, 3], dtype=tf.uint8, name='images')))
-    proto_path = tf.io.write_graph(
-        graphdef, output_dir, self.model_name + '_frozen.pb', as_text=False)
-    logging.info('Frozen graph saved at %s', proto_path)
+      # also save freeze pb file.
+      graphdef = self.freeze(
+          export_model.__call__.get_concrete_function(
+              tf.TensorSpec(
+                  shape=[None, None, None, 3], dtype=tf.uint8, name='images')))
+      proto_path = tf.io.write_graph(
+          graphdef, output_dir, self.model_name + '_frozen.pb', as_text=False)
+      logging.info('Frozen graph saved at %s', proto_path)
 
-    if tflite_path:
-      # Neither of the two approaches works so far.
-      converter = tf.lite.TFLiteConverter.from_keras_model(self.model)
-      converter.optimizations = [tf.lite.Optimize.DEFAULT]
-      converter.target_spec.supported_types = [tf.float16]
-      # converter = tf.lite.TFLiteConverter.from_saved_model(output_dir)
-      # converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+    if tflite:
+      image_size = utils.parse_image_size(self.params['image_size'])
+      converter = tf.lite.TFLiteConverter.from_concrete_functions([
+          export_model.tflite_call.get_concrete_function(
+              tf.TensorSpec(shape=[1, *image_size, 3]))
+      ])
 
+      if tflite == 'FP32':
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.target_spec.supported_types = [tf.float32]
+      elif tflite == 'FP16':
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.target_spec.supported_types = [tf.float16]
+      elif tflite == 'INT8':
+        num_calibration_steps = 10
+
+        def representative_dataset_gen():  # rewrite this for real data.
+          for _ in range(num_calibration_steps):
+            yield [np.ones((1, *image_size, 3), dtype=np.float32)]
+
+        converter.representative_dataset = representative_dataset_gen
+
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.inference_input_type = tf.uint8
+        converter.inference_output_type = tf.uint8
+        converter.target_spec.supported_ops = [
+            tf.lite.OpsSet.TFLITE_BUILTINS_INT8
+        ]
+      else:
+        raise ValueError('tflite must be one of {FP32, FP16, INT8}.')
+
+      tflite_path = os.path.join(output_dir, tflite.lower() + '.tflite')
       tflite_model = converter.convert()
       tf.io.gfile.GFile(tflite_path, 'wb').write(tflite_model)
       logging.info('TFLite is saved at %s', tflite_path)
