@@ -20,7 +20,9 @@ from tensorflow_model_optimization.python.core.quantization.keras import quantiz
 from tensorflow_model_optimization.python.core.quantization.keras.default_8bit import default_8bit_quantize_configs
 
 
-def quantize(layer, quantize_config=default_8bit_quantize_configs.Default8BitOutputQuantizeConfig()):
+def quantize(layer, quantize_config=None):
+  if quantize_config is None:
+    quantize_config = default_8bit_quantize_configs.Default8BitOutputQuantizeConfig()
   return quantize_wrapper.QuantizeWrapper(layer, quantize_config=quantize_config)
 
 optimzation_methods = {'prune': tfmot.sparsity.keras.prune_low_magnitude, 'quantize': quantize}
