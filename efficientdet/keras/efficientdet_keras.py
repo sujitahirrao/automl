@@ -25,8 +25,8 @@ from backbone import backbone_factory
 from backbone import efficientnet_builder
 from keras import fpn_configs
 from keras import postprocess
+from keras import tfmot
 from keras import util_keras
-from keras import model_optimization
 # pylint: disable=arguments-differ  # fo keras layers.
 
 
@@ -212,7 +212,7 @@ class OpAfterCombine(tf.keras.layers.Layer):
     if model_optimizations:
       for method in model_optimizations.keys():
         self.conv_op = (
-            model_optimization.get_method(method)(self.conv_op))
+            tfmot.get_method(method)(self.conv_op))
     self.bn = util_keras.build_batch_norm(
         is_training_bn=self.is_training_bn,
         data_format=self.data_format,
@@ -262,7 +262,7 @@ class ResampleFeatureMap(tf.keras.layers.Layer):
         name='conv2d')
     if model_optimizations:
       for method in model_optimizations.keys():
-        self.conv2d = model_optimization.get_method(method)(self.conv2d)
+        self.conv2d = tfmot.get_method(method)(self.conv2d)
     self.bn = util_keras.build_batch_norm(
         is_training_bn=self.is_training_bn,
         data_format=self.data_format,
@@ -279,14 +279,13 @@ class ResampleFeatureMap(tf.keras.layers.Layer):
           strides=[height_stride_size, width_stride_size],
           padding='SAME',
           data_format=self.data_format)(inputs)
-    elif self.pooling_type == 'avg':
+    if self.pooling_type == 'avg':
       return tf.keras.layers.AveragePooling2D(
           pool_size=[height_stride_size + 1, width_stride_size + 1],
           strides=[height_stride_size, width_stride_size],
           padding='SAME',
           data_format=self.data_format)(inputs)
-    else:
-      raise ValueError('Unsupported pooling type {}.'.format(self.pooling_type))
+    raise ValueError('Unsupported pooling type {}.'.format(self.pooling_type))
 
   def _upsample2d(self, inputs, target_height, target_width):
     return tf.cast(
@@ -366,6 +365,7 @@ class ClassNet(tf.keras.layers.Layer):
       survival_prob: if a value is set then drop connect will be used.
       strategy: string to specify training strategy for TPU/GPU/CPU.
       data_format: string of 'channel_first' or 'channels_last'.
+      grad_checkpoint: bool, If true, apply grad checkpoint for saving memory.
       name: the name of this layerl.
       **kwargs: other parameters.
     """
@@ -492,6 +492,7 @@ class BoxNet(tf.keras.layers.Layer):
       survival_prob: if a value is set then drop connect will be used.
       strategy: string to specify training strategy for TPU/GPU/CPU.
       data_format: string of 'channel_first' or 'channels_last'.
+      grad_checkpoint: bool, If true, apply grad checkpoint for saving memory.
       name: Name of the layer.
       **kwargs: other parameters.
     """

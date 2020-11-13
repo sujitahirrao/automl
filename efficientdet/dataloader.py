@@ -236,12 +236,14 @@ class InputReader:
                file_pattern,
                is_training,
                use_fake_data=False,
-               max_instances_per_image=None):
+               max_instances_per_image=None,
+               debug=False):
     self._file_pattern = file_pattern
     self._is_training = is_training
     self._use_fake_data = use_fake_data
     # COCO has 100 limit, but users may set different values for custom dataset.
     self._max_instances_per_image = max_instances_per_image or 100
+    self._debug = debug
 
   @tf.autograph.experimental.do_not_convert
   def dataset_parser(self, value, example_decoder, anchor_labeler, params):
@@ -310,8 +312,7 @@ class InputReader:
                 image, boxes, num_layers=1, magnitude=15)
           else:
             image, boxes = autoaugment.distort_image_with_autoaugment(
-                image, boxes, params['autoaugment_policy'],
-                params['use_augmix'], *params['augmix_params'])
+                image, boxes, params['autoaugment_policy'])
 
       input_processor = DetectionInputProcessor(image, params['image_size'],
                                                 boxes, classes)
@@ -346,6 +347,13 @@ class InputReader:
       areas = pad_to_fixed_size(areas, -1, [self._max_instances_per_image, 1])
       classes = pad_to_fixed_size(classes, -1,
                                   [self._max_instances_per_image, 1])
+      if params['mixed_precision']:
+        precision = utils.get_precision(params['strategy'],
+                                        params['mixed_precision'])
+        dtype = precision.split('_')[-1]
+        image = tf.cast(image, dtype=dtype)
+        box_targets = tf.nest.map_structure(
+            lambda box_target: tf.cast(box_target, dtype=dtype), box_targets)
       return (image, cls_targets, box_targets, num_positives, source_id,
               image_scale, boxes, is_crowds, areas, classes, image_masks)
 
@@ -381,6 +389,15 @@ class InputReader:
     labels['image_masks'] = image_masks
     return images, labels
 
+  @property
+  def dataset_options(self):
+    options = tf.data.Options()
+    options.experimental_deterministic = self._debug or not self._is_training
+    options.experimental_optimization.map_vectorization.enabled = True
+    options.experimental_optimization.map_parallelization = True
+    options.experimental_optimization.parallel_batch = True
+    return options
+
   def __call__(self, params, input_context=None, batch_size=None):
     input_anchors = anchors.Anchors(params['min_level'], params['max_level'],
                                     params['num_scales'],
@@ -394,8 +411,9 @@ class InputReader:
     )
 
     batch_size = batch_size or params['batch_size']
+    seed = params['tf_random_seed'] if self._debug else None
     dataset = tf.data.Dataset.list_files(
-        self._file_pattern, shuffle=self._is_training)
+        self._file_pattern, shuffle=self._is_training, seed=seed)
     if self._is_training:
       dataset = dataset.repeat()
     if input_context:
@@ -411,14 +429,9 @@ class InputReader:
 
     dataset = dataset.interleave(
         _prefetch_dataset, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    options = tf.data.Options()
-    options.experimental_deterministic = not self._is_training
-    options.experimental_optimization.map_vectorization.enabled = True
-    options.experimental_optimization.map_parallelization = True
-    options.experimental_optimization.parallel_batch = True
-    dataset = dataset.with_options(options)
+    dataset = dataset.with_options(self.dataset_options)
     if self._is_training:
-      dataset = dataset.shuffle(64)
+      dataset = dataset.shuffle(64, seed=seed)
 
     # Parse the fetched records to input tensors for model function.
     # pylint: disable=g-long-lambda

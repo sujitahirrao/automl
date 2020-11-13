@@ -50,6 +50,9 @@ class Config(object):
   def __repr__(self):
     return repr(self.as_dict())
 
+  def __deepcopy__(self, memodict={}):
+    return type(self)(self.as_dict())
+
   def __str__(self):
     try:
       return yaml.dump(self.as_dict(), indent=4)
@@ -181,11 +184,9 @@ def default_detection_configs():
   h.jitter_min = 0.1
   h.jitter_max = 2.0
   h.autoaugment_policy = None
-  h.use_augmix = False
   h.grid_mask = False
-  # mixture_width, mixture_depth, alpha
-  h.augmix_params = [3, -1, 1]
   h.sample_image = None
+  h.map_freq = 5  # AP eval frequency in epochs.
 
   # dataset specific parameters
   # TODO(tanmingxing): update this to be 91 for COCO, and 21 for pascal.
@@ -237,6 +238,7 @@ def default_detection_configs():
   h.weight_decay = 4e-5
   h.strategy = None  # 'tpu', 'gpus', None
   h.mixed_precision = False  # If False, use float32.
+  h.loss_scale = 2**10  # If False, use float32.
   h.model_optimizations = {}  # 'prune'
 
   # For detection.
@@ -253,7 +255,7 @@ def default_detection_configs():
   h.nms_configs = {
       'method': 'gaussian',
       'iou_thresh': None,  # use the default value based on method.
-      'score_thresh': None,
+      'score_thresh': 0.,
       'sigma': None,
       'max_nms_inputs': 0,
       'max_output_size': 100,
@@ -283,20 +285,6 @@ def default_detection_configs():
   h.dataset_type = None
   h.positives_momentum = None
   h.grad_checkpoint = False
-  # For device specific options.
-  h.device = {
-      # If true, apply gradient checkpointing to reduce memory usage.
-      'grad_ckpting': False,
-      # All ops in the list will be checkpointed, such as Add/Mul/Conv2d/Floor/
-      # Sigmoid and other ops, or more specific, e.g. blocks_10/se/conv2d_1.
-      # Adding more ops will save more memory at the cost of more computation.
-      # For EfficientDet, [Add_, AddN] reduces mbconv memory to one third
-      # with one third more compute, in particular enabling training d6 with
-      # batch size 2 on 11Gb (2080ti).
-      'grad_ckpting_list': ['Add_', 'AddN'],
-      # enable memory logging for NVIDIA cards.
-      'nvgpu_logging': False,
-  }
 
   return h
 
