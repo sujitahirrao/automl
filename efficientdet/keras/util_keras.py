@@ -93,13 +93,17 @@ def average_name(ema, var):
       var.name.split(':')[0] + '/' + ema.name, mark_as_used=False)
 
 
-def restore_ckpt(model, ckpt_path_or_file, ema_decay=0.):
+def restore_ckpt(model,
+                 ckpt_path_or_file,
+                 ema_decay=0.9998,
+                 skip_mismatch=True):
   """Restore variables from a given checkpoint.
 
   Args:
     model: the keras model to be restored.
     ckpt_path_or_file: the path or file for checkpoint.
     ema_decay: ema decay rate. If None or zero or negative value, disable ema.
+    skip_mismatch: whether to skip variables if shape mismatch.
   """
   if ckpt_path_or_file == '_':
     logging.info('Running test: do not load any ckpt.')
@@ -128,10 +132,45 @@ def restore_ckpt(model, ckpt_path_or_file, ema_decay=0.):
         var_dict[v.name.split(':')[0]] = v
     # try to load graph-based checkpoint with ema support,
     # else load checkpoint via keras.load_weights which doesn't support ema.
-    for key, var in var_dict.items():
+    for i, (key, var) in enumerate(var_dict.items()):
       try:
         var.assign(tf.train.load_variable(ckpt_path_or_file, key))
-      except tf.errors.NotFoundError:
-        logging.warning('Not found %s in %s', key, ckpt_path_or_file)
+        if i < 10:
+          logging.info('Init %s from %s (%s)', var.name, key, ckpt_path_or_file)
+      except tf.errors.NotFoundError as e:
+        if skip_mismatch:
+          logging.warning('Not found %s in %s', key, ckpt_path_or_file)
+        else:
+          raise e
       except ValueError as e:
-        logging.warning('%s: %s', key, e)
+        if skip_mismatch:
+          logging.warning('%s: %s', key, e)
+        else:
+          raise e
+
+
+def fp16_to_fp32_nested(input_nested):
+  """Convert fp16 tensors in a nested structure to fp32.
+
+  Args:
+    input_nested: A Python dict, values being Tensor or Python list/tuple of
+      Tensor or Non-Tensor.
+
+  Returns:
+    A Python dict with the same structure as `tensor_dict`,
+    with all bfloat16 tensors converted to float32.
+  """
+  if isinstance(input_nested, tf.Tensor):
+    if input_nested.dtype in (tf.bfloat16, tf.float16):
+      return tf.cast(input_nested, dtype=tf.float32)
+    else:
+      return input_nested
+  elif isinstance(input_nested, (list, tuple)):
+    out_tensor_dict = [fp16_to_fp32_nested(t) for t in input_nested]
+  elif isinstance(input_nested, dict):
+    out_tensor_dict = {
+        k: fp16_to_fp32_nested(v) for k, v in input_nested.items()
+    }
+  else:
+    return input_nested
+  return out_tensor_dict

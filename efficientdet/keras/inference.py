@@ -21,6 +21,7 @@ from absl import logging
 import numpy as np
 import tensorflow as tf
 
+import dataloader
 import hparams_config
 import utils
 from keras import efficientdet_keras
@@ -85,16 +86,18 @@ class ExportNetwork(tf.Module):
 class ExportModel(tf.Module):
   """Model to be exported as SavedModel/TFLite format."""
 
-  def __init__(self, model):
+  def __init__(self, model, pre_mode='infer'):
     super().__init__()
     self.model = model
+    self.pre_mode = pre_mode
 
   @tf.function
   def __call__(self, imgs):
-    return self.model(imgs, training=False, post_mode='global')
+    return self.model(
+        imgs, training=False, pre_mode=self.pre_mode, post_mode='global')
 
 
-class ServingDriver(object):
+class ServingDriver:
   """A driver for serving single or batch images.
 
   This driver supports serving with image files or arrays, with configurable
@@ -202,7 +205,9 @@ class ServingDriver(object):
       self.model = efficientdet_keras.EfficientDetModel(config=config)
     image_size = utils.parse_image_size(params['image_size'])
     self.model.build((self.batch_size, *image_size, 3))
-    util_keras.restore_ckpt(self.model, self.ckpt_path)
+    util_keras.restore_ckpt(self.model, self.ckpt_path,
+                            self.params['moving_average_decay'],
+                            skip_mismatch=False)
 
   def visualize(self, image, boxes, classes, scores, **kwargs):
     """Visualize prediction on image."""
@@ -217,8 +222,9 @@ class ServingDriver(object):
       bm_runs: Number of benchmark runs.
       trace_filename: If None, specify the filename for saving trace.
     """
+    _, spec = self._get_model_and_spec()
 
-    @tf.function
+    @tf.function(input_signature=[spec])
     def test_func(image_arrays):
       return self.model(image_arrays)  # pylint: disable=not-callable
 
@@ -250,6 +256,12 @@ class ServingDriver(object):
     Returns:
       A list of detections.
     """
+    if isinstance(self.model, tf.lite.Interpreter):
+      input_details = self.model.get_input_details()
+      output_details = self.model.get_output_details()
+      self.model.set_tensor(input_details[0]['index'], np.array(image_arrays))
+      self.model.invoke()
+      return [self.model.get_tensor(x['index']) for x in output_details]
     return self.model(image_arrays)  # pylint: disable=not-callable
 
   def load(self, saved_model_dir_or_frozen_graph: Text):
@@ -257,6 +269,11 @@ class ServingDriver(object):
     # Load saved model if it is a folder.
     if tf.saved_model.contains_saved_model(saved_model_dir_or_frozen_graph):
       self.model = tf.saved_model.load(saved_model_dir_or_frozen_graph)
+      return
+
+    if saved_model_dir_or_frozen_graph.endswith('.tflite'):
+      self.model = tf.lite.Interpreter(saved_model_dir_or_frozen_graph)
+      self.model.allocate_tensors()
       return
 
     # Load a frozen graph.
@@ -286,15 +303,21 @@ class ServingDriver(object):
     _, graphdef = convert_variables_to_constants_v2_as_graph(func)
     return graphdef
 
-  def _get_model_and_spec(self):
+  def _get_model_and_spec(self, tflite=None):
     """Get model instance and export spec."""
-    if self.only_network:
+    if self.only_network or tflite:
       image_size = utils.parse_image_size(self.params['image_size'])
       spec = tf.TensorSpec(
           shape=[self.batch_size, *image_size, 3],
           dtype=tf.float32,
           name='images')
-      export_model = ExportNetwork(self.model)
+      if self.only_network:
+        export_model = ExportNetwork(self.model)
+      else:
+        # If export tflite, we should remove preprocessing since TFLite doesn't
+        # support dynamic shape.
+        logging.info('Export model without preprocessing.')
+        export_model = ExportModel(self.model, pre_mode=None)
       return export_model, spec
     else:
       spec = tf.TensorSpec(
@@ -305,15 +328,20 @@ class ServingDriver(object):
   def export(self,
              output_dir: Text = None,
              tensorrt: Text = None,
-             tflite: Text = None):
+             tflite: Text = None,
+             file_pattern: Text = None,
+             num_calibration_steps: int = 2000):
     """Export a saved model, frozen graph, and potential tflite/tensorrt model.
 
     Args:
       output_dir: the output folder for saved model.
       tensorrt: If not None, must be {'FP32', 'FP16', 'INT8'}.
       tflite: Type for post-training quantization.
+      file_pattern: Glob for tfrecords, e.g. coco/val-*.tfrecord.
+      num_calibration_steps: Number of post-training quantization calibration
+        steps to run.
     """
-    export_model, input_spec = self._get_model_and_spec()
+    export_model, input_spec = self._get_model_and_spec(tflite)
     image_size = utils.parse_image_size(self.params['image_size'])
     if output_dir:
       tf.saved_model.save(
@@ -330,11 +358,11 @@ class ServingDriver(object):
       logging.info('Frozen graph saved at %s', proto_path)
 
     if tflite:
+      shape = (self.batch_size, *image_size, 3)
       input_spec = tf.TensorSpec(
-          shape=[self.batch_size, *image_size, 3], dtype=input_spec.dtype, name=input_spec.name)
+          shape=shape, dtype=input_spec.dtype, name=input_spec.name)
       converter = tf.lite.TFLiteConverter.from_concrete_functions(
           [export_model.__call__.get_concrete_function(input_spec)])
-
       if tflite == 'FP32':
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.target_spec.supported_types = [tf.float32]
@@ -342,20 +370,34 @@ class ServingDriver(object):
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.target_spec.supported_types = [tf.float16]
       elif tflite == 'INT8':
-        num_calibration_steps = 10
+        if file_pattern:
+          config = hparams_config.get_efficientdet_config(self.model_name)
+          config.override(self.params)
+          ds = dataloader.InputReader(
+              file_pattern,
+              is_training=False,
+              max_instances_per_image=config.max_instances_per_image)(
+                  config, batch_size=self.batch_size)
 
-        def representative_dataset_gen():  # rewrite this for real data.
-          for _ in range(num_calibration_steps):
-            yield [np.ones((self.batch_size, *image_size, 3), dtype=np.uint8)]
+          def representative_dataset_gen():
+            for image, _ in ds.take(num_calibration_steps):
+              yield [image]
+        else:  # Used for debugging, can remove later.
+          logging.warn('Use real representative dataset instead of fake ones.')
+          num_calibration_steps = 10
+          def representative_dataset_gen():  # rewrite this for real data.
+            for _ in range(num_calibration_steps):
+              yield [tf.ones(shape, dtype=input_spec.dtype)]
 
         converter.representative_dataset = representative_dataset_gen
-
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.inference_input_type = tf.uint8
         converter.inference_output_type = tf.uint8
-        converter.target_spec.supported_ops = [
-            tf.lite.OpsSet.TFLITE_BUILTINS_INT8
-        ]
+        supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+        if not self.only_network:
+          supported_ops.append(tf.lite.OpsSet.TFLITE_BUILTINS)
+        converter.target_spec.supported_ops = supported_ops
+
       else:
         raise ValueError(f'Invalid tflite {tflite}: must be FP32, FP16, INT8.')
 

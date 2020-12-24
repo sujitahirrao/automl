@@ -108,7 +108,7 @@ Notably,
 
 There are two types of latency: network latency and end-to-end latency.
 
-(1) To measure the network latency (from the fist conv to the last class/box
+(1) To measure the network latency (from the first conv to the last class/box
 prediction output), use the following command:
 
     !python model_inspect.py --runmode=bm --model_name=efficientdet-d0
@@ -238,7 +238,7 @@ You can run inference for a video and show the results online:
     // Run eval.
     !python main.py --mode=eval  \
         --model_name=${MODEL}  --model_dir=${CKPT_PATH}  \
-        --validation_file_pattern=tfrecord/val*  \
+        --val_file_pattern=tfrecord/val*  \
         --val_json_file=annotations/instances_val2017.json
 
 You can also run eval on test-dev set with the following command:
@@ -259,7 +259,7 @@ You can also run eval on test-dev set with the following command:
     # Also, test-dev has 20288 images rather than val 5000 images.
     !python main.py --mode=eval  \
         --model_name=${MODEL}  --model_dir=${CKPT_PATH}  \
-        --validation_file_pattern=tfrecord/testdev*  \
+        --val_file_pattern=tfrecord/testdev*  \
         --testdev_dir='testdev_output' --eval_samples=20288
     # Now you can submit testdev_output/detections_test-dev2017_test_results.json to
     # coco server: https://competitions.codalab.org/competitions/20794#participate
@@ -288,8 +288,8 @@ Create a config file for the PASCAL VOC dataset called voc_config.yaml and put t
 Finetune needs to use --ckpt rather than --backbone_ckpt.
 
     !python main.py --mode=train_and_eval \
-        --training_file_pattern=tfrecord/pascal*.tfrecord \
-        --validation_file_pattern=tfrecord/pascal*.tfrecord \
+        --train_file_pattern=tfrecord/pascal*.tfrecord \
+        --val_file_pattern=tfrecord/pascal*.tfrecord \
         --model_name=efficientdet-d0 \
         --model_dir=/tmp/efficientdet-d0-finetune  \
         --ckpt=efficientdet-d0  \
@@ -326,8 +326,8 @@ Download efficientdet coco checkpoint.
 Finetune needs to use --ckpt rather than --backbone_ckpt.
 
     python main.py --mode=train \
-        --training_file_pattern=tfrecord/pascal*.tfrecord \
-        --validation_file_pattern=tfrecord/pascal*.tfrecord \
+        --train_file_pattern=tfrecord/pascal*.tfrecord \
+        --val_file_pattern=tfrecord/pascal*.tfrecord \
         --model_name=efficientdet-d0 \
         --model_dir=/tmp/efficientdet-d0-finetune  \
         --ckpt=efficientdet-d0  \
@@ -358,7 +358,7 @@ To train this model on Cloud TPU, you will need:
 Then train the model:
 
     !export PYTHONPATH="$PYTHONPATH:/path/to/models"
-    !python main.py --tpu=TPU_NAME --training_file_pattern=DATA_DIR/*.tfrecord --model_dir=MODEL_DIR --strategy=tpu
+    !python main.py --tpu=TPU_NAME --train_file_pattern=DATA_DIR/*.tfrecord --model_dir=MODEL_DIR --strategy=tpu
 
     # TPU_NAME is the name of the TPU node, the same name that appears when you run gcloud compute tpus list, or ctpu ls.
     # MODEL_DIR is a GCS location (a URL starting with gs:// where both the GCE VM and the associated Cloud TPU have write access.
@@ -369,7 +369,7 @@ For more instructions about training on TPUs, please refer to the following tuto
 
   * EfficientNet tutorial: https://cloud.google.com/tpu/docs/tutorials/efficientnet
 
-## 11. Reducing Memory Usage when Training EfficientDets on GPU.
+## 11. Reducing Memory Usage when Training EfficientDets on GPU. (The current approach doesn't support mirrored multi GPU or mixed-precision training)
 
 EfficientDets use a lot of GPU memory for a few reasons:
 
@@ -377,7 +377,7 @@ EfficientDets use a lot of GPU memory for a few reasons:
 * Large internal activations for backbone: our backbone uses a relatively large expansion ratio (6), causing the large expanded activations.
 * Deep BiFPN: our BiFPN has multiple top-down and bottom-up paths, which leads to a lot of intermediate memory usage during training.
 
-To train this model on GPU with low memory there is an experimental option gradient_checkpointing.
+To train this model on GPU with low memory there is an experimental option grad_checkpoint.
 
 Check these links for a high-level idea of what gradient checkpointing is doing:
 1. https://medium.com/tensorflow/fitting-larger-networks-into-memory-583e3c758ff9
@@ -387,7 +387,31 @@ Check these links for a high-level idea of what gradient checkpointing is doing:
 If set to True, keras model uses ```tf.recompute_grad``` to achieve gradient checkpoints.
 
 Testing shows that:
-* It allows to train a d7x network with batch size of 2 by keras/train.py on a 11Gb (1080Ti) GPU
 * It also allows to train a d6 network with batch size of 2 by main.py on a 11Gb (1080Ti) GPU
+
+## 12. Visualize TF-Records.
+
+You can visualize tf-records with following commands:
+
+To visualize training tfrecords with input dataloader use.
+```
+python dataset/inspect_tfrecords.py --file_pattern dataset/sample.record\ 
+--model_name "efficientdet-d0" --samples 10\ 
+--save_samples_dir train_samples/  -hparams="label_map={1:'label1'}, autoaugmentation_policy=v3"
+
+```
+
+To visualize evaluation tfrecords use.
+```
+python dataset/inspect_tfrecords.py --file_pattern dataset/sample.record\ 
+--model_name "efficientdet-d0" --samples 10\ 
+--save_samples_dir train_samples/  -eval\
+-hparams="label_map={1:'label1'}"
+
+```
+* samples: random samples to visualize.
+* model_name: model name will be used to get image_size.
+* save_samples_dir: save dir.
+* eval: flag for eval data.
 
 NOTE: this is not an official Google product.
