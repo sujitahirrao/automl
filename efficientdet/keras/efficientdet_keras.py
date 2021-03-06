@@ -87,18 +87,14 @@ class FNode(tf.keras.layers.Layer):
     dtype = nodes[0].dtype
 
     if self.weight_method == 'attn':
-      edge_weights = []
-      for var in self.vars:
-        var = tf.cast(var, dtype=dtype)
-        edge_weights.append(var)
+      edge_weights = [tf.cast(var, dtype=dtype)
+                      for var in self.vars]
       normalized_weights = tf.nn.softmax(tf.stack(edge_weights))
       nodes = tf.stack(nodes, axis=-1)
       new_node = tf.reduce_sum(nodes * normalized_weights, -1)
     elif self.weight_method == 'fastattn':
-      edge_weights = []
-      for var in self.vars:
-        var = tf.cast(var, dtype=dtype)
-        edge_weights.append(var)
+      edge_weights = [tf.nn.relu(tf.cast(var, dtype=dtype))
+                      for var in self.vars]
       weights_sum = add_n(edge_weights)
       nodes = [
           nodes[i] * edge_weights[i] / (weights_sum + 0.0001)
@@ -106,19 +102,14 @@ class FNode(tf.keras.layers.Layer):
       ]
       new_node = add_n(nodes)
     elif self.weight_method == 'channel_attn':
-      edge_weights = []
-      for var in self.vars:
-        var = tf.cast(var, dtype=dtype)
-        edge_weights.append(var)
+      edge_weights = [tf.cast(var, dtype=dtype)
+                      for var in self.vars]
       normalized_weights = tf.nn.softmax(tf.stack(edge_weights, -1), axis=-1)
       nodes = tf.stack(nodes, axis=-1)
       new_node = tf.reduce_sum(nodes * normalized_weights, -1)
     elif self.weight_method == 'channel_fastattn':
-      edge_weights = []
-      for var in self.vars:
-        var = tf.cast(var, dtype=dtype)
-        edge_weights.append(var)
-
+      edge_weights = [tf.nn.relu(tf.cast(var, dtype=dtype))
+                      for var in self.vars]
       weights_sum = add_n(edge_weights)
       nodes = [
           nodes[i] * edge_weights[i] / (weights_sum + 0.0001)
@@ -132,10 +123,11 @@ class FNode(tf.keras.layers.Layer):
 
     return new_node
 
-  def _add_wsm(self, initializer):
+  def _add_wsm(self, initializer, shape=None):
     for i, _ in enumerate(self.inputs_offsets):
       name = 'WSM' + ('' if i == 0 else '_' + str(i))
-      self.vars.append(self.add_weight(initializer=initializer, name=name))
+      self.vars.append(self.add_weight(initializer=initializer,
+                                       name=name, shape=shape))
 
   def build(self, feats_shape):
     for i, input_offset in enumerate(self.inputs_offsets):
@@ -157,10 +149,10 @@ class FNode(tf.keras.layers.Layer):
       self._add_wsm('ones')
     elif self.weight_method == 'channel_attn':
       num_filters = int(self.fpn_num_filters)
-      self._add_wsm(lambda: tf.ones([num_filters]))
+      self._add_wsm(lambda shape, dtype, **kwargs: tf.ones(shape, dtype, **kwargs), num_filters)
     elif self.weight_method == 'channel_fastattn':
       num_filters = int(self.fpn_num_filters)
-      self._add_wsm(lambda: tf.ones([num_filters]))
+      self._add_wsm(lambda shape, dtype, **kwargs: tf.ones(shape, dtype, **kwargs), num_filters)
     self.op_after_combine = OpAfterCombine(
         self.is_training_bn,
         self.conv_bn_act_pattern,
